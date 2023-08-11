@@ -1,0 +1,4 @@
+*.wav
+*.pcmf32
+*.bin
+node_modules
