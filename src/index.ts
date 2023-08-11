@@ -179,12 +179,12 @@ class Whisper {
 
     if (Whisper.vad_simple(this.pcmf32, Whisper.WHISPER_SAMPLE_RATE, 1000, 0.6, 100.0, true)) {
       this.pcmf32 = [];
-      this.lines.push(this.text);
+      return {text: this.text};
     }
 
     //whisperLib.whisper_reset_timings(this.context);
 
-    return {lines: this.lines, partial: this.text};
+    return {partial: this.text};
   }
 
   static vad_simple(pcmf32: number[], sampleRate: number, lastMs: number, vadThold: number, freqThold: number, verbose: boolean): boolean {
