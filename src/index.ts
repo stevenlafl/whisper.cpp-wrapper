@@ -32,8 +32,8 @@ const WhisperFullParams = StructType({
 
   // [EXPERIMENTAL] token-level timestamps
   token_timestamps: ref.types.bool, // enable token-level timestamps
-  hold_pt: ref.types.float,         // timestamp token probability threshold (~0.01)
-  hold_ptsum: ref.types.float,      // timestamp token sum probability threshold (~0.01)
+  thold_pt: ref.types.float,         // timestamp token probability threshold (~0.01)
+  thold_ptsum: ref.types.float,      // timestamp token sum probability threshold (~0.01)
   max_len: ref.types.int,          // max segment length in characters
   split_on_word: ref.types.bool,    // split on word rather than on token (when used with max_len)
   max_tokens: ref.types.int,       // max tokens per segment (0 = no limit)
@@ -97,7 +97,7 @@ const WhisperFullParams = StructType({
   logits_filter_callback_user_data: ref.refType(ref.types.void),
 });
 
-const aprilLib = ffi.Library(
+const whisperLib = ffi.Library(
   // @ts-ignore
   new ffi.DynamicLibrary(
     './whisper.dll',
@@ -117,85 +117,141 @@ const aprilLib = ffi.Library(
   }
 );
 
-const context = aprilLib.whisper_init_from_file('./ggml-base.bin');
-const params = aprilLib.whisper_full_default_params(whisper_sampling_strategy.WHISPER_SAMPLING_GREEDY);
-params.print_realtime   = true;
-params.print_progress   = false;
-params.print_timestamps = true;
-params.print_special    = false;
-params.translate        = true;
-params.language         = "en";
-params.n_threads        = 8;
-params.offset_ms        = 0;
-params.single_segment   = false;
-params.no_context       = false;
+class Whisper {
+  context: ref.Pointer<void>;
+  params: any;
 
-params.new_segment_callback = new ffi.Callback(
-  'void',
-  [WhisperContext, ref.refType(ref.types.void), ref.types.int, ref.refType(ref.types.void)],
-  (ctx, state, n_new, user_data) => {
-    console.log('new_segment_callback');
+  static readonly WHISPER_SAMPLE_RATE = 16000;
+  static readonly n_samples_step      = (1e-3*3000 )*Whisper.WHISPER_SAMPLE_RATE;
+  static readonly n_samples_len       = (1e-3*5000 )*Whisper.WHISPER_SAMPLE_RATE;
+  static readonly n_samples_keep      = (1e-3*200  )*Whisper.WHISPER_SAMPLE_RATE;
+  static readonly n_samples_30s       = (1e-3*30000)*Whisper.WHISPER_SAMPLE_RATE;
+
+  constructor(model: string) {
+    this.context = whisperLib.whisper_init_from_file(model);
+    this.params = whisperLib.whisper_full_default_params(whisper_sampling_strategy.WHISPER_SAMPLING_GREEDY);
   }
-);
-console.log(params.prompt_tokens);
 
-var pcm_data = fs.readFileSync('test.wav');
-var pcm_data_view = new DataView(pcm_data.buffer);
-var newView = new DataView(new ArrayBuffer(pcm_data.buffer.byteLength*2));
+  pcm16sto32f(pcm16: Buffer): Buffer {
+    var pcm_data_view = new DataView(pcm16.buffer);
+    var newView = new DataView(new ArrayBuffer(pcm16.buffer.byteLength*2));
 
-for (let i = 0; i < pcm_data.buffer.byteLength; i+=2) {
-  newView.setFloat32(i*2, pcm_data_view.getInt16(i, true)/32768, true);
-}
+    for (let i = 0; i < pcm16.buffer.byteLength; i+=2) {
+      newView.setFloat32(i*2, pcm_data_view.getInt16(i, true)/32768, true);
+    }
 
-fs.writeFileSync('test2.wav', Buffer.from(newView.buffer));
+    return Buffer.from(newView.buffer);
+  }
 
-var pcm_data = fs.readFileSync('test2.wav');
-var pcm = new Float32Array(pcm_data.buffer);
-var arr = [];
-for (let i = 0; i < pcm.length; i++) {
-  arr[i] = pcm[i];
-}
+  prepare(pcm16: Buffer) {
+    var pcm_data = new Float32Array(pcm16.buffer);
+    var arr = [];
+    for (let i = 0; i < pcm_data.length; i++) {
+      arr[i] = pcm_data[i];
+    }
 
-aprilLib.whisper_reset_timings(context);
-aprilLib.whisper_full(context, params, arr, arr.length);
+    return arr;
+  }
 
-let tokens = [];
+  text: string = '';
+  lines: string[] = [];
+  pcmf32: Array<number> = [];
+  pcmf32_new: Array<number> = [];
 
-let x = aprilLib.whisper_full_n_segments(context);
-console.log(x);
-for (let i = 0; i < x; i++) {
-  let y = aprilLib.whisper_full_get_segment_text(context, i);
-  console.log(y);
-  for (let j = 0; j < aprilLib.whisper_full_n_tokens(context, i); j++) {
-    let z = aprilLib.whisper_full_get_token_id(context, i, j);
-    console.log(z);
-    tokens.push(z);
+  transcribe(arr: Array<number>) {
+
+    // const n_samples_new = arr.length;
+    // const n_samples_take = Math.min(this.pcmf32_old.length, Math.max(0, Whisper.n_samples_keep + Whisper.n_samples_len - n_samples_new));
+
+    // let pcmf32 = this.pcmf32_old.slice(-n_samples_take);
+    // pcmf32 = pcmf32.concat(arr);
+
+    // this.pcmf32_old = pcmf32;
+
+    this.pcmf32 = this.pcmf32.concat(arr);
+
+    this.text = '';
+    whisperLib.whisper_full(this.context, this.params, this.pcmf32, this.pcmf32.length);
+    let x = whisperLib.whisper_full_n_segments(this.context);
+    for (let i = 0; i < x; i++) {
+      this.text += whisperLib.whisper_full_get_segment_text(this.context, i);
+    }
+
+    if (Whisper.vad_simple(this.pcmf32, Whisper.WHISPER_SAMPLE_RATE, 1000, 0.6, 100.0, true)) {
+      this.pcmf32 = [];
+      this.lines.push(this.text);
+    }
+
+    //whisperLib.whisper_reset_timings(this.context);
+
+    return {lines: this.lines, partial: this.text};
+  }
+
+  static vad_simple(pcmf32: number[], sampleRate: number, lastMs: number, vadThold: number, freqThold: number, verbose: boolean): boolean {
+
+    let pcmf32_old = JSON.parse(JSON.stringify(pcmf32));
+
+    const nSamples = pcmf32_old.length;
+    const nSamplesLast = Math.round(sampleRate * lastMs / 1000);
+
+    if (nSamplesLast >= nSamples) {
+      // not enough samples - assume no speech
+      return false;
+    }
+
+    if (freqThold > 0) {
+      pcmf32_old = Whisper.highPassFilter(pcmf32_old, freqThold, sampleRate);
+    }
+
+    let energyAll = 0;
+    let energyLast = 0;
+
+    for (let i = 0; i < nSamples; i++) {
+      energyAll += Math.abs(pcmf32_old[i]);
+
+      if (i >= nSamples - nSamplesLast) {
+        energyLast += Math.abs(pcmf32_old[i]);
+      }
+    }
+
+    energyAll /= nSamples;
+    energyLast /= nSamplesLast;
+
+    if (verbose) {
+      console.log(`energy_all: ${energyAll}, energy_last: ${energyLast}, vad_thold: ${vadThold}, freq_thold: ${freqThold}`);
+    }
+
+    return energyLast <= vadThold * energyAll;
+  }
+
+  static highPassFilter(data: number[], cutoff: number, sampleRate: number): number[] {
+
+    const rc = 1 / (2 * Math.PI * cutoff);
+    const dt = 1 / sampleRate;
+    const alpha = dt / (rc + dt);
+
+    let y = data[0];
+
+    for (let i = 1; i < data.length; i++) {
+      y = alpha * (y + data[i] - data[i - 1]);
+      data[i] = y;
+    }
+
+    return data;
+
   }
 }
 
-var pcm_data = fs.readFileSync('jfk.pcmf32');
-var pcm = new Float32Array(pcm_data.buffer);
-var arr = [];
-for (let i = 0; i < pcm.length; i++) {
-  arr[i] = pcm[i];
+const whisper = new Whisper('./ggml-base.bin');
+const wav = fs.readFileSync('sample2.wav');
+const len = wav.length;
+const chunkLen = Math.round(len / 60);
+for (let i = 0; i < len; i += chunkLen) {
+  const chunk = Buffer.from(wav.slice(i, i + chunkLen));
+
+  //console.log(i, i + chunkLen, chunk);
+  const pcm = whisper.pcm16sto32f(chunk);
+  const arr = whisper.prepare(pcm);
+  const ret = whisper.transcribe(arr);
+  console.log(ret);
 }
-
-console.log('okay..');
-
-params.prompt_tokens = tokens;
-params.prompt_n_tokens = tokens.length;
-
-console.log('okay..');
-
-// doesn't work for some reason after setting prompt_tokens.
-aprilLib.whisper_full(context, params, arr, arr.length);
-
-x = aprilLib.whisper_full_n_segments(context);
-console.log(x);
-for (let i = 0; i < x; i++) {
-  let y = aprilLib.whisper_full_get_segment_text(context, i);
-  console.log(y);
-}
-console.log('test');
-aprilLib.whisper_print_timings(context);
-aprilLib.whisper_free(context);
