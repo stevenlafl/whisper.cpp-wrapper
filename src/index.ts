@@ -117,7 +117,7 @@ const whisperLib = ffi.Library(
   }
 );
 
-class Whisper {
+export class Whisper {
   context: ref.Pointer<void>;
   params: any;
 
@@ -130,6 +130,8 @@ class Whisper {
   constructor(model: string) {
     this.context = whisperLib.whisper_init_from_file(model);
     this.params = whisperLib.whisper_full_default_params(whisper_sampling_strategy.WHISPER_SAMPLING_GREEDY);
+
+    this.params.speed_up = true;
   }
 
   pcm16sto32f(pcm16: Buffer): Buffer {
@@ -240,18 +242,4 @@ class Whisper {
     return data;
 
   }
-}
-
-const whisper = new Whisper('./ggml-base.bin');
-const wav = fs.readFileSync('sample2.wav');
-const len = wav.length;
-const chunkLen = Math.round(len / 60);
-for (let i = 0; i < len; i += chunkLen) {
-  const chunk = Buffer.from(wav.slice(i, i + chunkLen));
-
-  //console.log(i, i + chunkLen, chunk);
-  const pcm = whisper.pcm16sto32f(chunk);
-  const arr = whisper.prepare(pcm);
-  const ret = whisper.transcribe(arr);
-  console.log(ret);
 }
