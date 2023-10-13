@@ -1,5 +1,6 @@
 *.wav
 *.pcmf32
 *.bin
+*.dll
 node_modules
 build

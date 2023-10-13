@@ -97,29 +97,11 @@ const WhisperFullParams = StructType({
   logits_filter_callback_user_data: ref.refType(ref.types.void),
 });
 
-const whisperLib = ffi.Library(
-  // @ts-ignore
-  new ffi.DynamicLibrary(
-    './whisper.dll',
-    ffi.DynamicLibrary.FLAGS.RTLD_NOW | ffi.DynamicLibrary.FLAGS.RTLD_GLOBAL
-  ), {
-    whisper_init_from_file: [WhisperContext, [ref.types.CString]],
-    whisper_is_multilingual: [ref.types.bool, [WhisperContext]],
-    whisper_free: ['void', [WhisperContext]],
-    whisper_full_default_params: [WhisperFullParams, [ref.types.int]],
-    whisper_reset_timings: ['void', [WhisperContext]],
-    whisper_full: ['void', [WhisperContext, WhisperFullParams, ArrayType(ref.types.float), ref.types.int]],
-    whisper_print_timings: ['void', [WhisperContext]],
-    whisper_full_n_segments: [ref.types.int, [WhisperContext]],
-    whisper_full_get_segment_text: [ref.types.CString, [WhisperContext, ref.types.int]],
-    whisper_full_n_tokens: [ref.types.int, [WhisperContext, ref.types.int]],
-    whisper_full_get_token_id: [ref.types.int, [WhisperContext, ref.types.int, ref.types.int]],
-  }
-);
-
 export class Whisper {
   context: ref.Pointer<void>;
   params: any;
+  whisperLib: any;
+  prompt_tokens: Array<number> = [];
 
   static readonly WHISPER_SAMPLE_RATE = 16000;
   static readonly n_samples_step      = (1e-3*3000 )*Whisper.WHISPER_SAMPLE_RATE;
@@ -127,11 +109,35 @@ export class Whisper {
   static readonly n_samples_keep      = (1e-3*200  )*Whisper.WHISPER_SAMPLE_RATE;
   static readonly n_samples_30s       = (1e-3*30000)*Whisper.WHISPER_SAMPLE_RATE;
 
-  constructor(model: string) {
-    this.context = whisperLib.whisper_init_from_file(model);
-    this.params = whisperLib.whisper_full_default_params(whisper_sampling_strategy.WHISPER_SAMPLING_GREEDY);
+  constructor(dllPath: string, model: string) {
 
-    this.params.speed_up = true;
+    this.whisperLib = ffi.Library(
+      // @ts-ignore
+      new ffi.DynamicLibrary(
+        dllPath,
+        ffi.DynamicLibrary.FLAGS.RTLD_NOW | ffi.DynamicLibrary.FLAGS.RTLD_GLOBAL
+      ), {
+        whisper_init_from_file: [WhisperContext, [ref.types.CString]],
+        whisper_is_multilingual: [ref.types.bool, [WhisperContext]],
+        whisper_free: ['void', [WhisperContext]],
+        whisper_full_default_params: [WhisperFullParams, [ref.types.int]],
+        whisper_reset_timings: ['void', [WhisperContext]],
+        whisper_full: ['void', [WhisperContext, WhisperFullParams, ArrayType(ref.types.float), ref.types.int]],
+        whisper_full_parallel: ['void', [WhisperContext, WhisperFullParams, ArrayType(ref.types.float), ref.types.int, ref.types.int]],
+        whisper_print_timings: ['void', [WhisperContext]],
+        whisper_full_n_segments: [ref.types.int, [WhisperContext]],
+        whisper_full_get_segment_text: [ref.types.CString, [WhisperContext, ref.types.int]],
+        whisper_full_n_tokens: [ref.types.int, [WhisperContext, ref.types.int]],
+        whisper_full_get_token_id: [ref.types.int, [WhisperContext, ref.types.int, ref.types.int]],
+      }
+    );
+
+    this.context = this.whisperLib.whisper_init_from_file(model);
+    this.params = this.whisperLib.whisper_full_default_params(whisper_sampling_strategy.WHISPER_SAMPLING_GREEDY);
+    this.params.n_threads = 16;
+    this.params.print_timestamps = true;
+    // this.params.no_context = false;
+    // this.params.n_max_text_ctx = 0;
   }
 
   pcm16sto32f(pcm16: Buffer): Buffer {
@@ -162,6 +168,30 @@ export class Whisper {
 
   transcribe(arr: Array<number>) {
 
+    let text = '';
+    //this.params.prompt_tokens = this.prompt_tokens;
+    //this.params.prompt_n_tokens = this.prompt_tokens.length;
+
+    this.whisperLib.whisper_full(this.context, this.params, arr, arr.length);
+    let x = this.whisperLib.whisper_full_n_segments(this.context);
+    for (let i = 0; i < x; i++) {
+      text += this.whisperLib.whisper_full_get_segment_text(this.context, i);
+
+      //this.prompt_tokens = [];
+      // const token_count = this.whisperLib.whisper_full_n_tokens(this.context, i);
+      // for (let j = 0; j < token_count; ++j) {
+      //   this.prompt_tokens.push(this.whisperLib.whisper_full_get_token_id(this.context, i, j));
+      // }
+    }
+
+    //this.whisperLib.whisper_print_timings(this.context);
+    //this.whisperLib.whisper_reset_timings(this.context);
+
+    return text;
+  }
+
+  transcribe2(arr: Array<number>) {
+
     // const n_samples_new = arr.length;
     // const n_samples_take = Math.min(this.pcmf32_old.length, Math.max(0, Whisper.n_samples_keep + Whisper.n_samples_len - n_samples_new));
 
@@ -173,13 +203,13 @@ export class Whisper {
     this.pcmf32 = this.pcmf32.concat(arr);
 
     this.text = '';
-    whisperLib.whisper_full(this.context, this.params, this.pcmf32, this.pcmf32.length);
-    let x = whisperLib.whisper_full_n_segments(this.context);
+    this.whisperLib.whisper_full(this.context, this.params, this.pcmf32, this.pcmf32.length);
+    let x = this.whisperLib.whisper_full_n_segments(this.context);
     for (let i = 0; i < x; i++) {
-      this.text += whisperLib.whisper_full_get_segment_text(this.context, i);
+      this.text += this.whisperLib.whisper_full_get_segment_text(this.context, i);
     }
 
-    if (Whisper.vad_simple(this.pcmf32, Whisper.WHISPER_SAMPLE_RATE, 1000, 0.6, 100.0, true)) {
+    if (Whisper.vad_simple(this.pcmf32, Whisper.WHISPER_SAMPLE_RATE, 100, 0.6, 100.0, true)) {
       this.pcmf32 = [];
       return {text: this.text};
     }
@@ -196,8 +226,12 @@ export class Whisper {
     const nSamples = pcmf32_old.length;
     const nSamplesLast = Math.round(sampleRate * lastMs / 1000);
 
-    if (nSamplesLast >= nSamples) {
+    if (nSamplesLast > nSamples) {
       // not enough samples - assume no speech
+
+      if (verbose) {
+        console.log(`nSamples: ${nSamples}, nSamplesLast: ${nSamplesLast}`);
+      }
       return false;
     }
 
