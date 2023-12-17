@@ -11,7 +11,12 @@ enum whisper_sampling_strategy {
 const StructType = require('ref-struct-di')(ref);
 const ArrayType = require('ref-array-di')(ref);
 
-const TokenArray = ArrayType(ref.types.int);
+const TokenArray = ArrayType(ref.types.int32);
+
+const GrammarElement = ArrayType(StructType({
+  type: ref.types.int,
+  value: ref.types.uint32,
+}));
 
 const WhisperContext = ref.refType(ref.types.void);
 const WhisperFullParams = StructType({
@@ -24,6 +29,7 @@ const WhisperFullParams = StructType({
 
   translate: ref.types.bool,
   no_context: ref.types.bool,        // do not use past transcription (if any) as initial prompt for the decoder
+  no_timestamps: ref.types.bool,     // do not generate timestamps
   single_segment: ref.types.bool,    // force single segment output (useful for streaming)
   print_special: ref.types.bool,     // print special tokens (e.g. <SOT>, <EOT>, <BEG>, etc.)
   print_progress: ref.types.bool,    // print progress information
@@ -41,6 +47,7 @@ const WhisperFullParams = StructType({
   // [EXPERIMENTAL] speed-up techniques
   // note: these can significantly reduce the quality of the output
   speed_up: ref.types.bool,          // speed-up the audio by 2x using Phase Vocoder
+  debug_mode: ref.types.bool,        // enable debug_mode provides extra info (eg. Dump log_mel)
   audio_ctx: ref.types.int,         // overwrite the audio context size (0 = use default)
 
   // [EXPERIMENTAL] [TDRZ] tinydiarize
@@ -92,10 +99,26 @@ const WhisperFullParams = StructType({
   encoder_begin_callback: ref.refType(ref.types.void),
   encoder_begin_callback_user_data: ref.refType(ref.types.void),
 
+  // called each time before ggml computation starts
+  abort_callback: ref.refType(ref.types.void),
+  abort_callback_user_data: ref.refType(ref.types.void),
+
   // called by each decoder to filter obtained logits
   logits_filter_callback: ref.refType(ref.types.void),
   logits_filter_callback_user_data: ref.refType(ref.types.void),
+
+  grammar_rules: GrammarElement,
+  n_grammar_rules: ref.types.ulong,
+  i_start_rule: ref.types.ulong,
+  grammar_penalty: ref.types.float,
 });
+
+
+type TranscriptionSegment =  {
+  text: string,
+  t0: number,
+  t1: number,
+};
 
 export class Whisper {
   context: ref.Pointer<void>;
@@ -119,14 +142,16 @@ export class Whisper {
       ), {
         whisper_init_from_file: [WhisperContext, [ref.types.CString]],
         whisper_is_multilingual: [ref.types.bool, [WhisperContext]],
-        whisper_free: ['void', [WhisperContext]],
+        whisper_free: [ref.types.void, [WhisperContext]],
         whisper_full_default_params: [WhisperFullParams, [ref.types.int]],
-        whisper_reset_timings: ['void', [WhisperContext]],
-        whisper_full: ['void', [WhisperContext, WhisperFullParams, ArrayType(ref.types.float), ref.types.int]],
-        whisper_full_parallel: ['void', [WhisperContext, WhisperFullParams, ArrayType(ref.types.float), ref.types.int, ref.types.int]],
-        whisper_print_timings: ['void', [WhisperContext]],
+        whisper_reset_timings: [ref.types.void, [WhisperContext]],
+        whisper_full: [ref.types.void, [WhisperContext, WhisperFullParams, ArrayType(ref.types.float), ref.types.int]],
+        whisper_full_parallel: [ref.types.void, [WhisperContext, WhisperFullParams, ArrayType(ref.types.float), ref.types.int, ref.types.int]],
+        whisper_print_timings: [ref.types.void, [WhisperContext]],
         whisper_full_n_segments: [ref.types.int, [WhisperContext]],
         whisper_full_get_segment_text: [ref.types.CString, [WhisperContext, ref.types.int]],
+        whisper_full_get_segment_t0: [ref.types.int, [WhisperContext, ref.types.int]],
+        whisper_full_get_segment_t1: [ref.types.int, [WhisperContext, ref.types.int]],
         whisper_full_n_tokens: [ref.types.int, [WhisperContext, ref.types.int]],
         whisper_full_get_token_id: [ref.types.int, [WhisperContext, ref.types.int, ref.types.int]],
       }
@@ -166,7 +191,7 @@ export class Whisper {
   pcmf32: Array<number> = [];
   pcmf32_new: Array<number> = [];
 
-  transcribe(arr: Array<number>) {
+  transcribe(arr: Array<number>): string {
 
     let text = '';
     //this.params.prompt_tokens = this.prompt_tokens;
@@ -184,39 +209,34 @@ export class Whisper {
       // }
     }
 
-    //this.whisperLib.whisper_print_timings(this.context);
-    //this.whisperLib.whisper_reset_timings(this.context);
+    // this.whisperLib.whisper_print_timings(this.context);
+    // this.whisperLib.whisper_reset_timings(this.context);
+    // this.whisperLib.whisper_free(this.context);
 
     return text;
   }
 
-  transcribe2(arr: Array<number>) {
+  transcribe_get_object(arr: Array<number>): TranscriptionSegment[] {
 
-    // const n_samples_new = arr.length;
-    // const n_samples_take = Math.min(this.pcmf32_old.length, Math.max(0, Whisper.n_samples_keep + Whisper.n_samples_len - n_samples_new));
+    let retArr: TranscriptionSegment[] = [];
+    //this.params.prompt_tokens = this.prompt_tokens;
+    //this.params.prompt_n_tokens = this.prompt_tokens.length;
 
-    // let pcmf32 = this.pcmf32_old.slice(-n_samples_take);
-    // pcmf32 = pcmf32.concat(arr);
-
-    // this.pcmf32_old = pcmf32;
-
-    this.pcmf32 = this.pcmf32.concat(arr);
-
-    this.text = '';
-    this.whisperLib.whisper_full(this.context, this.params, this.pcmf32, this.pcmf32.length);
+    this.whisperLib.whisper_full(this.context, this.params, arr, arr.length);
     let x = this.whisperLib.whisper_full_n_segments(this.context);
     for (let i = 0; i < x; i++) {
-      this.text += this.whisperLib.whisper_full_get_segment_text(this.context, i);
+      retArr.push({
+        text: this.whisperLib.whisper_full_get_segment_text(this.context, i),
+        t0: this.whisperLib.whisper_full_get_segment_t0(this.context, i),
+        t1: this.whisperLib.whisper_full_get_segment_t1(this.context, i),
+      });
     }
 
-    if (Whisper.vad_simple(this.pcmf32, Whisper.WHISPER_SAMPLE_RATE, 100, 0.6, 100.0, true)) {
-      this.pcmf32 = [];
-      return {text: this.text};
-    }
+    // this.whisperLib.whisper_print_timings(this.context);
+    // this.whisperLib.whisper_reset_timings(this.context);
+    // this.whisperLib.whisper_free(this.context);
 
-    //whisperLib.whisper_reset_timings(this.context);
-
-    return {partial: this.text};
+    return retArr;
   }
 
   static vad_simple(pcmf32: number[], sampleRate: number, lastMs: number, vadThold: number, freqThold: number, verbose: boolean): boolean {

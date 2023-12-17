@@ -1,13 +1,14 @@
 {
-  "name": "whisper.js",
-  "version": "1.0.0",
-  "description": "",
+  "name": "whisper.cpp-wrapper",
+  "version": "1.5.2",
+  "author": "Steven Linn",
+  "description": "Whisper.cpp wrapper for Node.js",
   "main": "build/src/index.js",
   "types": "build/src/index.d.ts",
   "files": [
     "build/src"
   ],
-  "license": "Apache-2.0",
+  "license": "MIT",
   "keywords": [],
   "scripts": {
     "start": "ts-node src/test.ts",
@@ -21,19 +22,21 @@
     "posttest": "npm.cmd run lint"
   },
   "devDependencies": {
-    "@types/ffi-napi": "^4.0.7",
-    "@types/node": "^14.11.2",
-    "@types/ref-napi": "^3.0.7",
-    "gts": "^3.1.1",
-    "ts-node": "^10.9.1",
-    "typescript": "~4.7.0"
+    "@types/ffi-napi": "^4.0.10",
+    "@types/ref-napi": "^3.0.12",
+    "node-vad": "^1.1.4",
+    "speaker": "^0.5.4",
+    "ts-node": "^10.9.2"
   },
   "dependencies": {
-    "@types/ref-array-di": "^1.2.5",
-    "@types/ref-struct-di": "^1.1.9",
-    "ffi-napi": "npm:@breush/ffi-napi",
+    "@types/node": "^20.10.4",
+    "@types/ref-array-di": "^1.2.8",
+    "@types/ref-struct-di": "^1.1.12",
+    "ffi-napi": "npm:@breush/ffi-napi@^4.0.13",
+    "gts": "^5.2.0",
     "ref-array-di": "^1.2.2",
-    "ref-napi": "npm:@breush/ref-napi",
-    "ref-struct-di": "^1.1.1"
+    "ref-napi": "npm:@breush/ref-napi@^4.0.9",
+    "ref-struct-di": "^1.1.1",
+    "typescript": "^5.3.3"
   }
 }
